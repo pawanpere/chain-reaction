@@ -5,6 +5,7 @@ A two-phone take on the classic Chain Reaction board game. One HTML file, no bui
 - **Play online.** Tap "Play online", send the link, and the game starts when the other person joins. Hearts, nudges and a running score between the two of you.
 - **Pass and play.** Two to eight players sharing one device, with undo.
 - **Boards.** 6×9 (the classic), 8×12 and 10×15.
+- **Pieces.** Play as the classic orb in your colour, or as an emoji: pick from the brainrot set (💀 🗿 😭 🥀 🤡 🦈 🐊 and friends) or paste any emoji. Tap your name during a game to swap.
 
 ## Rules
 

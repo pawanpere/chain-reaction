@@ -23,6 +23,7 @@
   --me:#ec4a3c;--turn:#6d6a62;
   --ui:"Archivo","Helvetica Neue",Helvetica,Arial,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --emoji:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;
 }
 *,*::before,*::after{box-sizing:border-box}
 html,body{margin:0;min-height:100%;background:var(--ink);color:var(--text)}
@@ -55,6 +56,16 @@ h1,h2,p{margin:0}
 .swatch[aria-pressed="true"]{outline:2px solid var(--text);outline-offset:3px}
 .orb,.swatch{background:var(--c);background:radial-gradient(circle at 34% 30%,color-mix(in srgb,var(--c) 34%,#fff) 0,var(--c) 50%,color-mix(in srgb,var(--c) 60%,#000) 100%)}
 .orb{display:inline-block;width:14px;height:14px;border-radius:50%;flex:none}
+.pc{display:inline-grid;place-items:center;width:18px;height:18px;flex:none;font:16px/1 var(--emoji)}
+.pc.big{width:26px;height:26px;font-size:22px}
+.picker{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px}
+.pick{aspect-ratio:1;min-width:0;display:grid;place-items:center;padding:0;border:1px solid var(--rule);border-radius:2px;background:var(--ink-2);font:clamp(18px,5.4vw,23px)/1 var(--emoji)}
+.pick:hover{background:var(--ink-3)}
+.pick[aria-pressed="true"]{border-color:var(--text);background:var(--ink-3)}
+.pick .orb{width:58%;height:58%}
+.custom{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:10px}
+.custom .input{height:44px}
+.pl.tap{cursor:pointer}
 .orb.big{width:22px;height:22px}
 .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--rule);border-radius:2px;overflow:hidden}
 .seg button{height:44px;border:0;background:transparent;color:var(--muted);font:500 14px var(--mono);font-variant-numeric:tabular-nums}
@@ -174,6 +185,10 @@ h1,h2,p{margin:0}
       <input class="input" id="name" maxlength="16" autocomplete="nickname" placeholder="First name is enough" enterkeyhint="done">
     </div>
     <div>
+      <span class="lab" id="pieceLab">Your piece</span>
+      <div id="pieces" role="group" aria-labelledby="pieceLab"></div>
+    </div>
+    <div>
       <span class="lab" id="colorLab">Your colour</span>
       <div class="swatches" id="swatches" role="group" aria-labelledby="colorLab"></div>
     </div>
@@ -290,6 +305,8 @@ const SIZES = [[6, 9], [8, 12], [10, 15]];
 const CODE_ABC = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const MAX_WAVES = 4000;
 const GREY = '#6d6a62';
+const EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji","Twemoji Mozilla",sans-serif';
+const EMOJIS = ['💀', '🗿', '😭', '🥀', '🤡', '🙏', '🤓', '😹', '🫃', '🦈', '🐊', '🪵', '🐒', '🍌', '🩰', '🤌', '🐸', '🤑', '😈', '🥶', '🫠', '🗣️', '🐐'];
 
 function rid(n, abc = 'abcdefghijkmnpqrstuvwxyz23456789') {
   const a = new Uint32Array(n);
@@ -322,6 +339,16 @@ const store = {
   set(k, v) { try { localStorage.setItem(KEY(k), JSON.stringify(v)); } catch (e) {} },
 };
 const cleanName = n => String(n == null ? '' : n).replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 16);
+// A piece is one emoji (a single grapheme, so flags and skin tones survive) or '' for the classic orb.
+const SEG = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+const EMOJI_RE = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
+function cleanEmoji(s) {
+  s = String(s == null ? '' : s).trim();
+  if (!s) return '';
+  let g = '';
+  if (SEG) { for (const part of SEG.segment(s)) { g = part.segment; break; } } else g = Array.from(s)[0] || '';
+  return g.length <= 16 && EMOJI_RE.test(g) ? g : '';
+}
 
 const savedProfile = store.get('profile') || {};
 const profile = {
@@ -330,6 +357,7 @@ const profile = {
   color: Number.isInteger(savedProfile.color) && savedProfile.color >= 0 && savedProfile.color < COLORS.length ? savedProfile.color : 0,
   size: Number.isInteger(savedProfile.size) && savedProfile.size >= 0 && savedProfile.size < SIZES.length ? savedProfile.size : 0,
   sound: savedProfile.sound !== false,
+  emoji: cleanEmoji(savedProfile.emoji),
 };
 const saveProfile = () => store.set('profile', profile);
 saveProfile();
@@ -422,7 +450,7 @@ class BoardView {
   constructor(canvas, box, opts) {
     this.cv = canvas; this.box = box; this.ctx = canvas.getContext('2d');
     this.opts = Object.assign({ gridAlpha: 0.62, maxCell: 96, markLast: true, onTap: null }, opts || {});
-    this.game = null; this.colorOf = () => GREY;
+    this.game = null; this.colorOf = () => GREY; this.emojiOf = () => '';
     this.cell = 0; this.dpr = 1; this.sprites = new Map();
     this.flights = null; this.bumps = new Map(); this.flashes = [];
     this.skeleton = false; this.raf = 0;
@@ -430,9 +458,10 @@ class BoardView {
     new ResizeObserver(() => this.refit()).observe(box);
     if (this.opts.onTap) canvas.addEventListener('click', e => { const i = this.cellAt(e.clientX, e.clientY); if (i >= 0) this.opts.onTap(i); });
   }
-  setGame(g, colorOf) {
+  setGame(g, colorOf, emojiOf) {
     this.game = g;
     if (colorOf) this.colorOf = colorOf;
+    if (emojiOf) this.emojiOf = emojiOf;
     this.flights = null; this.bumps.clear(); this.flashes = [];
     this.sprites.clear();
     this.refit();
@@ -484,7 +513,30 @@ class BoardView {
     this.sprites.set(hex, s);
     return s;
   }
-  orb(hex, x, y, sc) { const s = this.sprite(hex), d = s.d * sc; this.ctx.drawImage(s.c, x - d / 2, y - d / 2, d, d); }
+  emojiSprite(e) {
+    const key = 'e:' + e;
+    let s = this.sprites.get(key);
+    if (s) return s;
+    const px = Math.max(8, Math.round(this.cell * 0.44 * this.dpr)), size = Math.ceil(px * 1.3);
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const x = c.getContext('2d');
+    x.font = px + 'px ' + EMOJI_FONT;
+    x.textAlign = 'center';
+    x.textBaseline = 'alphabetic';
+    const m = x.measureText(e);
+    const asc = m.actualBoundingBoxAscent || px * 0.8, desc = m.actualBoundingBoxDescent || px * 0.2;
+    x.fillText(e, size / 2, size / 2 + (asc - desc) / 2);
+    s = { c, d: size / this.dpr };
+    this.sprites.set(key, s);
+    return s;
+  }
+  // Draw one piece for player p: their emoji if they picked one, otherwise an orb in their colour.
+  piece(p, x, y, sc) {
+    const e = this.emojiOf(p);
+    const s = e ? this.emojiSprite(e) : this.sprite(this.colorOf(p)), d = s.d * sc;
+    this.ctx.drawImage(s.c, x - d / 2, y - d / 2, d, d);
+  }
   center(i) { const g = this.game, c = this.cell; return [(i % g.cols + 0.5) * c, (Math.floor(i / g.cols) + 0.5) * c]; }
   frame(t) { this.raf = requestAnimationFrame(this.frame); this.draw(t); }
   start() { if (!this.raf) this.raf = requestAnimationFrame(this.frame); }
@@ -526,26 +578,31 @@ class BoardView {
       const p = clamp((t - F.t0) / F.dur, 0, 1), e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
       for (const f of F.list) {
         const [ax, ay] = this.center(f.from), [bx, by] = this.center(f.to);
-        this.orb(this.colorOf(f.p), ax + (bx - ax) * e, ay + (by - ay) * e, 1);
+        this.piece(f.p, ax + (bx - ax) * e, ay + (by - ay) * e, 1);
       }
     }
   }
   cellOrbs(i, t) {
     const g = this.game, n = g.count[i], crit = g.nb[i].length, cell = this.cell, r = this.orbR();
     let [cx, cy] = this.center(i);
-    // One orb short of bursting: shake.
+    const k = Math.min(n, 4), pts = LAYOUT[k];
+    // One orb short of bursting: shake. Three-orb clusters are already big and spinning, so they only tremble.
     const hot = n >= crit - 1 && g.winner < 0;
-    if (hot && !REDUCED) { const a = cell * 0.024; cx += Math.sin(t * 0.09 + i * 1.7) * a; cy += Math.cos(t * 0.11 + i * 2.3) * a; }
+    if (hot && !REDUCED) {
+      const a = cell * (k >= 3 ? 0.01 : 0.022);
+      cx += Math.sin(t * 0.08 + i * 1.7) * a; cy += Math.cos(t * 0.1 + i * 2.3) * a;
+    }
     let sc = 1;
     const b = this.bumps.get(i);
     if (b !== undefined) {
       const p = Math.max(0, (t - b) / 180);
       if (p >= 1) this.bumps.delete(i); else sc = 1 + 0.28 * (1 - p) * (1 - p);
     }
-    const k = Math.min(n, 4), pts = LAYOUT[k];
-    const ang = k > 1 ? (REDUCED ? 0 : t / 1000 * (hot ? 2.8 : 1.05)) + i * 0.77 : 0;
-    const co = Math.cos(ang), si = Math.sin(ang), hex = this.colorOf(g.owner[i]);
-    for (const [px, py] of pts) this.orb(hex, cx + (px * co - py * si) * r * sc, cy + (px * si + py * co) * r * sc, sc);
+    const spin = hot ? (k >= 3 ? 1.6 : 2.6) : 1.0;
+    const ang = k > 1 ? (REDUCED ? 0 : t / 1000 * spin) + i * 0.77 : 0;
+    const owner = g.owner[i], spread = r * (this.emojiOf(owner) ? 1.12 : 1) * sc;
+    const co = Math.cos(ang), si = Math.sin(ang);
+    for (const [px, py] of pts) this.piece(owner, cx + (px * co - py * si) * spread, cy + (px * si + py * co) * spread, sc);
   }
   mark(i, hex) {
     const g = this.game, c = this.cell, x = this.ctx;
@@ -719,7 +776,7 @@ class Relay {
 // Room state merges like a max: newer game, then longer move list, then a stable
 // tie-break. Seats merge on their own version counter. Every copy converges.
 const isPrefix = (a, b) => a.length <= b.length && a.every((m, i) => m === b[i]);
-const seatKey = p => (p ? [p.id, p.v, p.name, p.color].join(':') : '-');
+const seatKey = p => (p ? [p.id, p.v, p.name, p.color, p.e || ''].join(':') : '-');
 const gameKey = s => [s.cols + 'x' + s.rows, s.first, s.score.join(','), s.moves.join(',')].join('|');
 const roomKey = s => s.g + '|' + gameKey(s) + '|' + s.players.map(seatKey).join('/');
 function pickSeat(a, b) {
@@ -749,7 +806,7 @@ function validRoom(s, code) {
   if (!Array.isArray(s.moves) || s.moves.length > 5000 || !s.moves.every(m => Number.isInteger(m) && m >= 0 && m < cols * rows)) return null;
   if (!Array.isArray(s.players) || s.players.length !== 2) return null;
   const players = s.players.map(p => (p && typeof p.id === 'string' && p.id.length >= 4 && p.id.length <= 40)
-    ? { id: p.id, name: cleanName(p.name) || 'Player', color: clamp(p.color | 0, 0, COLORS.length - 1), v: Math.max(1, p.v | 0) }
+    ? { id: p.id, name: cleanName(p.name) || 'Player', color: clamp(p.color | 0, 0, COLORS.length - 1), v: Math.max(1, p.v | 0), e: cleanEmoji(p.e) }
     : null);
   if (!players[0]) return null;
   const score = Array.isArray(s.score) ? [Math.max(0, s.score[0] | 0), Math.max(0, s.score[1] | 0)] : [0, 0];
@@ -762,9 +819,20 @@ function validLocal(s) {
   if (!Array.isArray(s.moves) || !s.moves.every(m => Number.isInteger(m) && m >= 0 && m < s.cols * s.rows)) return null;
   const names = Array.from({ length: n }, (_, p) => cleanName(s.names && s.names[p]) || COLORS[p].name);
   const colors = Array.from({ length: n }, (_, p) => { const c = s.colors && s.colors[p]; return Number.isInteger(c) && c >= 0 && c < COLORS.length ? c : p; });
-  return { cols: s.cols, rows: s.rows, n, first: clamp(s.first | 0, 0, n - 1), names, colors, moves: s.moves.slice() };
+  const emojis = Array.from({ length: n }, (_, p) => cleanEmoji(s.emojis && s.emojis[p]));
+  return { cols: s.cols, rows: s.rows, n, first: clamp(s.first | 0, 0, n - 1), names, colors, emojis, moves: s.moves.slice() };
 }
 const seatColor = (s, r) => { const p = r && r.players[s]; return p ? COLORS[p.color].hex : GREY; };
+const seatEmoji = (s, r) => { const p = r && r.players[s]; return p && p.e ? p.e : ''; };
+const onlineColor = p => seatColor(p, Online.room);
+const onlineEmoji = p => seatEmoji(p, Online.room);
+const localColor = p => COLORS[Local.st.colors[p]].hex;
+const localEmoji = p => Local.st.emojis[p] || '';
+
+// Small inline marker for a player: their emoji, or an orb in their colour.
+function chip(hex, e, big) {
+  return e ? h('span', { class: 'pc' + (big ? ' big' : ''), text: e }) : h('span', { class: 'orb' + (big ? ' big' : ''), style: '--c:' + hex });
+}
 
 // ---------------------------------------------------------------- app state
 let screen = '', mode = '';
@@ -836,6 +904,33 @@ function segSizes(box, sel, pick) {
   box.replaceChildren(...SIZES.map(([c, r], k) => h('button', { type: 'button', 'aria-pressed': String(k === sel), onclick: () => pick(k) }, c + '×' + r)));
 }
 
+// Piece picker: the classic orb, the brainrot set, or any emoji pasted in.
+// o = { selected, color, taken: [emoji], takenBy: name, onPick(e) }
+function pieceGrid(box, o) {
+  const list = [''].concat(EMOJIS);
+  if (o.selected && !list.includes(o.selected)) { list.splice(1, 0, o.selected); list.pop(); }
+  const taken = o.taken || [];
+  const grid = h('div', { class: 'picker' }, ...list.map(e => h('button', {
+    type: 'button', class: 'pick', 'aria-pressed': String(e === o.selected),
+    'aria-label': e ? 'Play as ' + e : 'Classic orb', title: e ? '' : 'Classic orb',
+    disabled: !!e && taken.includes(e), onclick: () => o.onPick(e),
+  }, e || h('span', { class: 'orb', style: '--c:' + o.color }))));
+  const inp = h('input', { class: 'input', placeholder: 'Or paste any emoji', 'aria-label': 'Any emoji', autocomplete: 'off', enterkeyhint: 'done' });
+  const use = () => {
+    const e = cleanEmoji(inp.value);
+    if (!e) { tip("That isn't an emoji. Paste one from your emoji keyboard."); inp.focus(); return; }
+    if (taken.includes(e)) { tip((o.takenBy || 'Someone else') + ' already plays as ' + e + '.'); return; }
+    o.onPick(e);
+  };
+  inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); use(); } });
+  box.replaceChildren(grid, h('div', { class: 'custom' }, inp, h('button', { class: 'btn small', type: 'button', onclick: use }, 'Use')));
+}
+function openPiecePicker(title, o) {
+  const box = h('div');
+  pieceGrid(box, Object.assign({}, o, { onPick: e => { closeSheet(); o.onPick(e); } }));
+  sheet([h('p', { class: 'eyebrow', text: title }), box, h('button', { class: 'btn ghost', type: 'button', onclick: closeSheet }, 'Cancel')], true);
+}
+
 function overlay(kind, sig, build) {
   const ov = $('#ov');
   if (!ov.hidden && ov.dataset.kind === kind && ov.dataset.sig === sig) return;
@@ -883,6 +978,12 @@ function openMenu() {
   }
   const canNew = mode === 'local' || (mode === 'online' && Online.seat >= 0 && Online.room && Online.room.players[1]);
   if (canNew) items.push(confirmButton(h('button', { class: 'sheet-item', type: 'button' }, 'Start a new game'), 'Start a new game', 'Tap again to start over', () => { closeSheet(); if (mode === 'local') localNew(); else onlineNewGame(null); }));
+  if (mode === 'online' && Online.seat >= 0 && Online.room) {
+    const s = Online.seat;
+    items.push(h('button', { class: 'sheet-item', type: 'button', onclick: pickMyPiece }, 'Your piece', chip(seatColor(s, Online.room), seatEmoji(s, Online.room))));
+  } else if (mode === 'local' && Local.st) {
+    items.push(h('button', { class: 'sheet-item', type: 'button', onclick: () => pickLocalPiece(Local.game ? Local.game.turn : 0) }, 'Change pieces', h('span', { class: 'val', text: 'or tap a name' })));
+  }
   items.push(h('button', { class: 'sheet-item', type: 'button', onclick: openRules }, 'How to play'));
   items.push(h('a', { class: 'sheet-item', href: '#', onclick: closeSheet }, 'Leave to home'));
   items.push(h('button', { class: 'sheet-item', type: 'button', onclick: closeSheet }, 'Close'));
@@ -919,6 +1020,7 @@ function showHome() {
 }
 function renderHome() {
   document.documentElement.style.setProperty('--me', COLORS[profile.color].hex);
+  pieceGrid($('#pieces'), { selected: profile.emoji, color: COLORS[profile.color].hex, onPick: e => { profile.emoji = e; saveProfile(); renderHome(); } });
   swatches($('#swatches'), profile.color, k => { profile.color = k; saveProfile(); renderHome(); }, []);
   segSizes($('#sizes'), profile.size, k => { profile.size = k; saveProfile(); renderHome(); });
   renderResume();
@@ -933,7 +1035,7 @@ function renderResume() {
     if (seat < 0) continue;
     const other = r.players[1 - seat];
     items.push(h('a', { class: 'resume-item', href: '#' + r.room },
-      h('span', { class: 'orb', style: '--c:' + (other ? COLORS[other.color].hex : GREY) }),
+      other ? chip(COLORS[other.color].hex, other.e) : chip(GREY, ''),
       h('span', { class: 'ri-text', text: other ? 'Continue with ' + other.name : 'Your room, waiting for a partner' }),
       h('span', { class: 'ri-code', text: r.room })));
     if (items.length >= 2) break;
@@ -941,7 +1043,7 @@ function renderResume() {
   const loc = validLocal(store.get('local'));
   if (loc && loc.moves.length && replay(loc.cols, loc.rows, loc.n, loc.first, loc.moves).winner < 0) {
     items.push(h('a', { class: 'resume-item', href: '#local' },
-      h('span', { class: 'orb', style: '--c:' + COLORS[loc.colors[0]].hex }),
+      chip(COLORS[loc.colors[0]].hex, loc.emojis[0]),
       h('span', { class: 'ri-text', text: 'Continue pass and play' }),
       h('span', { class: 'ri-code', text: loc.n + ' players' })));
   }
@@ -959,7 +1061,7 @@ function createRoom() {
   let code;
   do { code = rid(6, CODE_ABC); } while (store.get('room:' + code));
   const [cols, rows] = SIZES[profile.size] || SIZES[0];
-  const room = { v: 1, room: code, g: 1, cols, rows, first: 0, score: [0, 0], moves: [], players: [{ id: profile.id, name: profile.name, color: profile.color, v: 1 }, null], t: Date.now() };
+  const room = { v: 1, room: code, g: 1, cols, rows, first: 0, score: [0, 0], moves: [], players: [{ id: profile.id, name: profile.name, color: profile.color, v: 1, e: profile.emoji }, null], t: Date.now() };
   store.set('room:' + code, room);
   remember(code);
   location.hash = code;
@@ -973,6 +1075,8 @@ function joinByCode() {
 
 // ---------------------------------------------------------------- demo board on the home screen
 const demoColor = p => COLORS[p === 0 ? profile.color : (profile.color === 1 ? 0 : 1)].hex;
+// With an emoji picked, the demo opponent plays an emoji too, so the preview shows the look.
+const demoEmoji = p => (p === 0 ? profile.emoji : (profile.emoji ? (profile.emoji === '🗿' ? '💀' : '🗿') : ''));
 function demoPick(g) {
   const p = g.turn, mine = [], free = [];
   for (let i = 0; i < g.size; i++) { if (g.owner[i] === p) mine.push(i); else if (g.owner[i] < 0) free.push(i); }
@@ -985,7 +1089,7 @@ function demoPick(g) {
 function startDemo() {
   const tok = ++demo.token;
   demo.game = new Game(8, 3, 2, 0);
-  demo.view.setGame(demo.game, demoColor);
+  demo.view.setGame(demo.game, demoColor, demoEmoji);
   demo.view.start();
   (async () => {
     await sleep(450);
@@ -996,7 +1100,7 @@ function startDemo() {
         await sleep(1800);
         if (demo.token !== tok) return;
         demo.game = new Game(8, 3, 2, 0);
-        demo.view.setGame(demo.game, demoColor);
+        demo.view.setGame(demo.game, demoColor, demoEmoji);
         await sleep(400);
         continue;
       }
@@ -1008,11 +1112,12 @@ function startDemo() {
 function stopDemo() { demo.token++; demo.view.stop(); }
 
 // ---------------------------------------------------------------- pass and play
-const setup = { n: 2, size: 0, names: [] };
+const setup = { n: 2, size: 0, names: [], emojis: [] };
 function showSetup() {
   mode = '';
   setup.size = profile.size;
   if (!setup.names[0] && profile.name) setup.names[0] = profile.name;
+  if (setup.emojis[0] === undefined) setup.emojis[0] = profile.emoji;
   show('setup');
   renderSetup();
 }
@@ -1024,7 +1129,13 @@ function renderSetup() {
     const inp = h('input', { class: 'input', id: 'pn' + p, maxlength: '16', placeholder: COLORS[p].name, 'aria-label': 'Player ' + (p + 1) + ' name', autocomplete: 'off' });
     inp.value = setup.names[p] || '';
     inp.addEventListener('input', () => { setup.names[p] = inp.value; });
-    return h('div', { class: 'pname' }, h('span', { class: 'orb big', style: '--c:' + COLORS[p].hex }), inp);
+    const pick = () => openPiecePicker(possessive(cleanName(setup.names[p]) || COLORS[p].name) + ' piece', {
+      selected: setup.emojis[p] || '', color: COLORS[p].hex, takenBy: 'Another player',
+      taken: setup.emojis.filter((e, q) => e && q !== p && q < setup.n),
+      onPick: e => { setup.emojis[p] = e; renderSetup(); },
+    });
+    const btn = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Choose a piece for player ' + (p + 1), onclick: pick }, chip(COLORS[p].hex, setup.emojis[p] || '', true));
+    return h('div', { class: 'pname' }, btn, inp);
   }));
   renderSetupSizes();
 }
@@ -1038,7 +1149,7 @@ function enterLocal() {
   show('play'); hideOverlay(); dockMode();
   Local.game = replay(st.cols, st.rows, st.n, st.first, st.moves);
   view.skeleton = false;
-  view.setGame(Local.game, p => COLORS[Local.st.colors[p]].hex);
+  view.setGame(Local.game, localColor, localEmoji);
   renderHud();
   if (Local.game.winner >= 0) overlay('over', 'l' + st.moves.length, overLocalPanel);
   keepAwake(true);
@@ -1116,7 +1227,7 @@ function enterRoom(code) {
   remember(code);
   const cached = validRoom(store.get('room:' + code), code);
   if (cached) { Online.room = cached; Online.seat = cached.players.findIndex(p => p && p.id === profile.id); }
-  else { view.skeleton = true; view.setGame(new Game(6, 9, 2, 0), () => GREY); }
+  else { view.skeleton = true; view.setGame(new Game(6, 9, 2, 0), () => GREY, () => ''); }
   renderNet(); renderHud(); renderOnlineOverlay();
   applyRoom();
   Online.relay = makeRelay(code);
@@ -1184,7 +1295,7 @@ async function applyRoom() {
         Online.game = replay(r.cols, r.rows, 2, r.first, r.moves);
         Online.shown = { g: r.g, cols: r.cols, rows: r.rows, first: r.first, moves: r.moves.slice() };
         view.skeleton = false;
-        view.setGame(Online.game, p => seatColor(p, Online.room));
+        view.setGame(Online.game, onlineColor, onlineEmoji);
         if (sh && sh.g !== r.g) {
           const s = r.first;
           toast('New game. ' + (s === Online.seat ? 'You start.' : (r.players[s] ? r.players[s].name + ' starts.' : '')));
@@ -1237,20 +1348,50 @@ function claimSeat(s, takeover) {
   const r = Online.room;
   if (!r) return;
   const cur = r.players[s], other = r.players[1 - s];
-  let name, color;
+  let name, color, e;
   if (takeover && cur) {
-    name = cur.name; color = cur.color;
+    name = cur.name; color = cur.color; e = cur.e || '';
     if (!profile.name) { profile.name = name; saveProfile(); }
   } else {
-    name = profile.name; color = profile.color;
+    name = profile.name; color = profile.color; e = profile.emoji;
     if (other && other.color === color) color = (color + 1) % COLORS.length;
+    if (other && e && other.e === e) e = '';
   }
   const players = r.players.slice();
-  players[s] = { id: profile.id, name, color, v: (cur ? cur.v : 0) + 1 };
+  players[s] = { id: profile.id, name, color, v: (cur ? cur.v : 0) + 1, e };
   Online.watching = false;
   const next = Object.assign({}, r, { players, t: Date.now() });
   setRoom(next);
   if (Online.relay) Online.relay.publish(next);
+}
+
+// Swap your piece mid-game. The seat's version bump makes the change win the merge on both phones.
+function setMyPiece(e) {
+  const r = Online.room, s = Online.seat;
+  if (!r || s < 0) return;
+  const me = r.players[s], other = r.players[1 - s];
+  if (e && other && other.e === e) { tip(other.name + ' already plays as ' + e + '.'); return; }
+  profile.emoji = e; saveProfile();
+  const players = r.players.slice();
+  players[s] = Object.assign({}, me, { e, v: me.v + 1 });
+  const next = Object.assign({}, r, { players, t: Date.now() });
+  setRoom(next);
+  if (Online.relay) Online.relay.publish(next);
+}
+function pickMyPiece() {
+  const r = Online.room, s = Online.seat;
+  if (!r || s < 0) return;
+  const other = r.players[1 - s];
+  openPiecePicker('Your piece', { selected: seatEmoji(s, r), color: seatColor(s, r), taken: other && other.e ? [other.e] : [], takenBy: other ? other.name : '', onPick: setMyPiece });
+}
+function pickLocalPiece(p) {
+  const st = Local.st;
+  if (!st) return;
+  openPiecePicker(possessive(st.names[p]) + ' piece', {
+    selected: st.emojis[p] || '', color: COLORS[st.colors[p]].hex, takenBy: 'Another player',
+    taken: st.emojis.filter((e, q) => e && q !== p),
+    onPick: e => { st.emojis[p] = e; store.set('local', st); renderHud(); },
+  });
 }
 
 function onlineNewGame(sizeIdx) {
@@ -1341,15 +1482,18 @@ function joinPanel() {
   let color = profile.color === host.color ? (host.color + 1) % COLORS.length : profile.color;
   const input = h('input', { class: 'input', id: 'joinName', maxlength: '16', placeholder: 'First name is enough', autocomplete: 'nickname', enterkeyhint: 'go' });
   input.value = profile.name;
+  let emoji = profile.emoji && profile.emoji !== host.e ? profile.emoji : '';
   const sw = h('div', { class: 'swatches', role: 'group', 'aria-label': 'Your colour' });
+  const pieces = h('div', { role: 'group', 'aria-label': 'Your piece' });
   const paint = () => {
     swatches(sw, color, k => { color = k; paint(); }, [host.color]);
+    pieceGrid(pieces, { selected: emoji, color: COLORS[color].hex, taken: host.e ? [host.e] : [], takenBy: host.name, onPick: e => { emoji = e; paint(); } });
     $('#ov').style.setProperty('--me', COLORS[color].hex);
   };
   const go = () => {
     const n = cleanName(input.value);
     if (!n) { input.focus(); tip('Add your name to join'); return; }
-    profile.name = n; profile.color = color; saveProfile();
+    profile.name = n; profile.color = color; profile.emoji = emoji; saveProfile();
     Sfx.unlock();
     claimSeat(1, false);
   };
@@ -1357,8 +1501,9 @@ function joinPanel() {
   paint();
   return [
     h('p', { class: 'eyebrow', text: 'Room ' + r.room }),
-    h('h2', { class: 'ov-title' }, h('span', { style: 'color:' + COLORS[host.color].hex, text: host.name }), ' invited you to a game'),
+    h('h2', { class: 'ov-title' }, h('span', { style: 'color:' + COLORS[host.color].hex, text: (host.e ? host.e + ' ' : '') + host.name }), ' invited you to a game'),
     h('div', {}, h('label', { class: 'lab', for: 'joinName', text: 'Your name' }), input),
+    h('div', {}, h('span', { class: 'lab', text: 'Your piece' }), pieces),
     h('div', {}, h('span', { class: 'lab', text: 'Your colour' }), sw),
     h('button', { class: 'btn primary', type: 'button', onclick: go }, 'Join game'),
   ];
@@ -1370,7 +1515,7 @@ function fullPanel() {
     h('h2', { class: 'ov-title', text: 'This room already has two players' }),
     h('p', { class: 'muted', text: 'If one of them is you on another phone or browser, pick your name to carry on here.' }),
     ...r.players.map((p, s) => h('button', { class: 'btn', type: 'button', onclick: () => claimSeat(s, true) },
-      h('span', { class: 'orb', style: '--c:' + COLORS[p.color].hex }), "I'm " + p.name)),
+      chip(COLORS[p.color].hex, p.e), "I'm " + p.name)),
     h('button', { class: 'btn ghost', type: 'button', onclick: () => { Online.watching = true; renderOnlineOverlay(); } }, 'Just watch'),
   ];
 }
@@ -1387,7 +1532,7 @@ function overOnlinePanel() {
     h('p', { class: 'eyebrow', text: 'Game ' + r.g + ' · ' + g.plies + ' moves' }),
     h('h2', { class: 'ov-title', style: 'color:' + seatColor(w, r), text: w === seat ? 'You win' : nm(w) + ' wins' }),
     h('div', { class: 'tally' }, ...[0, 1].map(s => h('div', { class: 'tally-row', style: '--c:' + seatColor(s, r) },
-      h('span', { class: 'orb' }), h('span', { class: 'nm', text: nm(s) }), h('b', { text: String(score[s]) })))),
+      chip(seatColor(s, r), seatEmoji(s, r)), h('span', { class: 'nm', text: nm(s) }), h('b', { text: String(score[s]) })))),
   ];
   if (seat >= 0) {
     kids.push(h('div', {}, h('span', { class: 'lab', text: 'Next board' }), seg));
@@ -1414,7 +1559,8 @@ function renderHud() {
     return;
   }
   const r = Online.room;
-  const colorOf = online ? (p => seatColor(p, r)) : (p => COLORS[Local.st.colors[p]].hex);
+  const colorOf = online ? onlineColor : localColor;
+  const emojiOf = online ? onlineEmoji : localEmoji;
   const nameOf = online ? (p => (r.players[p] ? r.players[p].name : 'Waiting')) : (p => Local.st.names[p]);
   const active = g.winner >= 0 ? g.winner : g.turn;
   playEl.style.setProperty('--turn', colorOf(active));
@@ -1436,8 +1582,13 @@ function renderHud() {
   const orbs = g.orbs();
   const running = !online || !!r.players[1];
   const mk = (p, right) => {
-    const el = h('div', { class: 'pl' + (right ? ' right' : '') + (p === active && running ? ' on' : '') + (g.isOut(p, orbs) ? ' out' : ''), style: '--c:' + colorOf(p) },
-      h('span', { class: 'orb' }), h('span', { class: 'nm', text: nameOf(p) }), h('span', { class: 'ct', title: 'Orbs on the board', text: String(orbs[p]) }));
+    // Tap your own name (online) or anyone's (pass and play) to swap pieces.
+    const canPick = online ? p === Online.seat : true;
+    const el = h('div', {
+      class: 'pl' + (right ? ' right' : '') + (p === active && running ? ' on' : '') + (g.isOut(p, orbs) ? ' out' : '') + (canPick ? ' tap' : ''),
+      style: '--c:' + colorOf(p), title: canPick ? 'Change piece' : null,
+      onclick: canPick ? () => (online ? pickMyPiece() : pickLocalPiece(p)) : null,
+    }, chip(colorOf(p), emojiOf(p)), h('span', { class: 'nm', text: nameOf(p) }), h('span', { class: 'ct', title: 'Orbs on the board', text: String(orbs[p]) }));
     if (online && r.players[p] && Online.seat >= 0 && p !== Online.seat && !isOnline(r.players[p].id)) el.append(h('span', { class: 'away', text: 'away' }));
     return el;
   };
@@ -1466,7 +1617,8 @@ $('#pplus').addEventListener('click', () => { setup.n = Math.min(8, setup.n + 1)
 $('#startLocal').addEventListener('click', () => {
   const [cols, rows] = SIZES[setup.size] || SIZES[0];
   const names = Array.from({ length: setup.n }, (_, p) => cleanName(setup.names[p]) || COLORS[p].name);
-  store.set('local', { cols, rows, n: setup.n, first: 0, names, colors: names.map((_, p) => p), moves: [] });
+  const emojis = names.map((_, p) => setup.emojis[p] || '');
+  store.set('local', { cols, rows, n: setup.n, first: 0, names, colors: names.map((_, p) => p), emojis, moves: [] });
   Sfx.unlock();
   if (location.hash === '#local') enterLocal(); else location.hash = 'local';
 });
